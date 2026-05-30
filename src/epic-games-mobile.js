@@ -1,7 +1,9 @@
+import { gotoWithRetry } from './util.js';
+
 // following https://github.com/vogler/free-games-claimer/issues/474
 
 const get = async (page, platform = 'android') => { // or ios
-  await page.goto(`https://egs-platform-service.store.epicgames.com/api/v2/public/discover/home?count=10&country=DE&locale=en&platform=${platform}&start=0&store=EGS`);
+  await gotoWithRetry(page, `https://egs-platform-service.store.epicgames.com/api/v2/public/discover/home?count=10&country=DE&locale=en&platform=${platform}&start=0&store=EGS`, {}, { label: `epic mobile ${platform}` });
   const response = await page.innerText('body');
   return JSON.parse(response);
 };
@@ -47,7 +49,7 @@ export const getPlatformGames = async (page, platform) => {
   });
 };
 
-export const getMobileGames = async (context) => {
+export const getMobileGames = async context => {
   const page = await context.newPage();
   const r = [...await getPlatformGames(page, 'android'), ...await getPlatformGames(page, 'ios')];
   await page.close();

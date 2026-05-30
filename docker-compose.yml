@@ -16,4 +16,4 @@ services:
     # command: bash -c "node epic-games; node gog"
     environment:
       # - EMAIL=foo@bar.org
-      # - NOTIFY='tgram://...'
+      # - NOTIFY=<apprise-url>

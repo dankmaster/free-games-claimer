@@ -1,6 +1,8 @@
 // https://stackoverflow.com/questions/46745014/alternative-for-dirname-in-node-js-when-using-es6-modules
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 // not the same since these will give the absolute paths for this file instead of for the file using them
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,6 +22,173 @@ export const datetimeUTC = (d = new Date()) => d.toISOString().replace('T', ' ')
 // same as datetimeUTC() but for local timezone, e.g., UTC + 2h for the above in DE
 export const datetime = (d = new Date()) => datetimeUTC(new Date(d.getTime() - d.getTimezoneOffset() * 60000));
 export const filenamify = s => s.replaceAll(':', '.').replace(/[^a-z0-9 _\-.]/gi, '_'); // alternative: https://www.npmjs.com/package/filenamify - On Unix-like systems, / is reserved. On Windows, <>:"/\|?* along with trailing periods are reserved.
+
+const RETRYABLE_NAVIGATION_ERROR_PARTS = [
+  'timeout',
+  'navigation',
+  'net::',
+  'ns_error',
+  'econn',
+  'socket',
+];
+
+const isRetryableNavigationError = error => {
+  const message = `${error?.message || error || ''}`.toLowerCase();
+  if (!message) return true;
+  if (message.includes('target page, context or browser has been closed')) return false;
+  return RETRYABLE_NAVIGATION_ERROR_PARTS.some(part => message.includes(part));
+};
+
+export const gotoWithRetry = async (page, url, options = {}, { label = url, retries = 2, baseDelayMs = 1500 } = {}) => {
+  const maxAttempts = retries + 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await page.goto(url, options);
+    } catch (error) {
+      if (attempt == maxAttempts || !isRetryableNavigationError(error)) throw error;
+      const waitMs = baseDelayMs * 2 ** (attempt - 1);
+      console.warn(`[retry] page.goto failed for ${label} (attempt ${attempt}/${maxAttempts}): ${(error.message || error).split('\n')[0]}`);
+      await delay(waitMs);
+    }
+  }
+};
+
+export class ExitError extends Error {
+  constructor(code = 1, message = '') {
+    super(message || `Exit ${code}`);
+    this.name = 'ExitError';
+    this.exitCode = code;
+  }
+}
+
+export const abortRun = (code = 1, message = '') => {
+  throw new ExitError(code, message);
+};
+
+export const isExitError = error => error instanceof ExitError || Number.isInteger(error?.exitCode);
+
+const stripHtml = value => `${value || ''}`.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+const summarizeRunGames = games => {
+  const counts = { total: games.length, claimed: 0, existed: 0, failed: 0, skipped: 0, other: 0 };
+
+  for (const game of games) {
+    const status = stripHtml(game?.status);
+    if (!status) {
+      counts.other++;
+    } else if (status.includes('failed')) {
+      counts.failed++;
+    } else if (status.includes('claimed') || status.includes('redeemed')) {
+      counts.claimed++;
+    } else if (status.includes('existed') || status.includes('already')) {
+      counts.existed++;
+    } else if (status.includes('skipped') || status.includes('manual')) {
+      counts.skipped++;
+    } else {
+      counts.other++;
+    }
+  }
+
+  return counts;
+};
+
+const deriveRunStatus = ({ error, exitCode, counts }) => {
+  const badExit = (exitCode ?? 0) !== 0;
+  if (badExit || error && !isExitError(error)) return counts.claimed ? 'partial' : 'error';
+  if (counts.failed) return counts.claimed ? 'partial' : 'warning';
+  if (counts.claimed) return 'ok';
+  return 'noop';
+};
+
+const normalizeRunAction = (action, runStore = null) => {
+  if (!action || typeof action != 'object') return null;
+
+  const normalized = {};
+  if (runStore) normalized.sourceStore = action.sourceStore || runStore;
+  for (const [key, value] of Object.entries(action)) {
+    if (value === null || value === undefined || value === '') continue;
+    normalized[key] = value;
+  }
+
+  return Object.keys(normalized).length ? normalized : null;
+};
+
+const summarizeRunActions = (actions, runStore = null) => {
+  const seen = new Set();
+
+  return actions
+    .map(action => normalizeRunAction(action, runStore))
+    .filter(Boolean)
+    .filter(action => {
+      const key = JSON.stringify(action);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const appendManualActionHistory = async ({ run, user, finishedAt, actions }) => {
+  const db = await jsonDb('manual-actions.json', { updatedAt: null, entries: [] });
+  db.data.updatedAt = finishedAt;
+
+  for (const action of actions) {
+    db.data.entries.push({
+      detectedAt: finishedAt,
+      runStore: run.store,
+      runStartedAt: run.startedAt,
+      runFinishedAt: finishedAt,
+      user,
+      ...action,
+    });
+  }
+
+  await db.write();
+};
+
+export const createRunSummary = store => ({
+  store,
+  startedAt: new Date().toISOString(),
+  startedMs: Date.now(),
+});
+
+export const writeRunSummary = async (run, { user = null, games = [], manualActions = [], error = null, exitCode = process.exitCode, extra = {} } = {}) => {
+  const db = await jsonDb('last-run.json', { updatedAt: null, stores: {} });
+  const previous = db.data.stores[run.store] || {};
+  const finishedAt = new Date().toISOString();
+  const counts = summarizeRunGames(games);
+  const actions = summarizeRunActions(manualActions, run.store);
+  const status = deriveRunStatus({ error, exitCode, counts });
+  const errorText = error ? `${error.message || error}`.split('\n')[0] : null;
+
+  db.data.updatedAt = finishedAt;
+  db.data.stores[run.store] = {
+    store: run.store,
+    status,
+    startedAt: run.startedAt,
+    finishedAt,
+    durationMs: Date.now() - run.startedMs,
+    exitCode: exitCode ?? 0,
+    user: user || previous.user || null,
+    counts,
+    manualActionCount: actions.length,
+    manualActions: actions,
+    lastError: status == 'error' || status == 'partial' || status == 'warning'
+      ? errorText || (counts.failed ? `${counts.failed} failed item(s)` : previous.lastError || null)
+      : null,
+    lastSuccessAt: status == 'error' ? previous.lastSuccessAt || null : finishedAt,
+    ...extra,
+  };
+  await db.write();
+  if (actions.length) {
+    await appendManualActionHistory({
+      run,
+      user: user || previous.user || null,
+      finishedAt,
+      actions,
+    });
+  }
+};
 
 export const handleSIGINT = (context = null) => process.on('SIGINT', async () => { // e.g. when killed by Ctrl-C
   console.error('\nInterrupted by SIGINT. Exit!'); // Exception shows where the script was:\n'); // killed before catch in docker...
@@ -47,6 +216,89 @@ export const launchChromium = async options => {
     ...options,
   });
   return context;
+};
+
+export const extensionArgs = ({ headless = false } = {}) => {
+  const args = [];
+  if (!headless && cfg.start_minimized) {
+    args.push('--start-minimized');
+  }
+
+  if (cfg.chrome_debugging_port) {
+    args.push(`--remote-debugging-port=${cfg.chrome_debugging_port}`);
+    console.log(`Chrome DevTools Protocol listening on http://127.0.0.1:${cfg.chrome_debugging_port}`);
+  }
+
+  const dirs = cfg.dir.extensions;
+  if (!dirs.length) return args;
+  if (headless && !cfg.extensions_in_headless) {
+    console.warn('Skipping Chromium extensions in headless mode. Set EXTENSIONS_IN_HEADLESS=1 to opt in.');
+    return args;
+  }
+
+  const existingDirs = dirs.filter(dir => {
+    if (existsSync(dir)) return true;
+    console.warn(`Extension directory does not exist, skipping: ${dir}`);
+    return false;
+  });
+  if (!existingDirs.length) return args;
+
+  const extensions = existingDirs.join(',');
+  console.log('Loading Chromium extensions:', existingDirs);
+  return [
+    ...args,
+    `--disable-extensions-except=${extensions}`,
+    `--load-extension=${extensions}`,
+  ];
+};
+
+export const capturePageDiagnostics = async (page, label, { fullPage = false } = {}) => {
+  const debugDir = resolve(cfg.dir.screenshots, 'debug');
+  if (!debugDir) return null;
+
+  await mkdir(debugDir, { recursive: true });
+  const safeLabel = filenamify(`${datetime()} ${label}`);
+  const screenshotPath = path.join(debugDir, `${safeLabel}.png`);
+  const jsonPath = path.join(debugDir, `${safeLabel}.json`);
+  const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(_ => '');
+  const visibleElements = await page.evaluate(() => {
+    const isVisible = el => {
+      const style = window.getComputedStyle(el);
+      return style.display != 'none'
+        && style.visibility != 'hidden'
+        && !el.hasAttribute('hidden')
+        && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    };
+
+    return Array.from(document.querySelectorAll('a, button, input, [role="button"], [data-a-target], #menuUsername, .menu-account__user-name'))
+      .filter(isVisible)
+      .slice(0, 80)
+      .map(el => ({
+        tag: el.tagName.toLowerCase(),
+        text: (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        id: el.id || null,
+        name: el.getAttribute('name') || null,
+        type: el.getAttribute('type') || null,
+        href: el.getAttribute('href') || null,
+        dataTarget: el.getAttribute('data-a-target') || null,
+        role: el.getAttribute('role') || null,
+      }));
+  }).catch(error => [{ error: `${error.message || error}`.split('\n')[0] }]);
+
+  await page.screenshot({ path: screenshotPath, fullPage }).catch(error => {
+    console.warn(`[diagnostics] Failed to capture screenshot for ${label}: ${error.message.split('\n')[0]}`);
+  });
+  await writeFile(jsonPath, JSON.stringify({
+    label,
+    capturedAt: datetime(),
+    url: page.url(),
+    title: await page.title().catch(_ => null),
+    bodySnippet: bodyText.replace(/\s+/g, ' ').trim().slice(0, 2500),
+    visibleElements,
+  }, null, 2));
+  console.warn(`[diagnostics] ${label}: ${screenshotPath}`);
+  console.warn(`[diagnostics] ${label}: ${jsonPath}`);
+  return { screenshotPath, jsonPath };
 };
 
 export const stealth = async context => {
@@ -105,6 +357,46 @@ enquirer.use(timeoutPlugin(cfg.login_timeout)); // TODO may not want to have thi
 // @ts-ignore
 export const prompt = o => enquirer.prompt({ name: 'name', type: 'input', message: 'Enter value', ...o }).then(r => r.name).catch(_ => {});
 export const confirm = o => prompt({ type: 'confirm', message: 'Continue?', ...o });
+export const waitForPromiseOrEscape = (promise, { message = '', exitCode = 0, exitMessage = 'Cancelled interactively' } = {}) => new Promise((resolve, reject) => {
+  const stdin = process.stdin;
+  if (!stdin?.isTTY || typeof stdin.setRawMode != 'function') {
+    promise.then(resolve, reject);
+    return;
+  }
+
+  if (message) console.info(message);
+
+  const wasRaw = !!stdin.isRaw;
+  let settled = false;
+  const cleanup = () => {
+    if (settled) return;
+    settled = true;
+    stdin.off('data', onData);
+    if (!wasRaw) stdin.setRawMode(false);
+    stdin.pause();
+  };
+  const finishResolve = value => {
+    cleanup();
+    resolve(value);
+  };
+  const finishReject = error => {
+    cleanup();
+    reject(error);
+  };
+  const onData = data => {
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (bytes.length == 1 && bytes[0] == 0x1b) {
+      finishReject(new ExitError(exitCode, exitMessage));
+    } else if (bytes.length == 1 && bytes[0] == 0x03) {
+      finishReject(new ExitError(130, 'Interrupted by SIGINT'));
+    }
+  };
+
+  if (!wasRaw) stdin.setRawMode(true);
+  stdin.resume();
+  stdin.on('data', onData);
+  promise.then(finishResolve, finishReject);
+});
 
 // notifications via apprise CLI
 import { execFile } from 'child_process';

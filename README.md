@@ -59,6 +59,79 @@ If you are missing some dependencies for the browser on your system, you can use
 If you don't want to use Docker for quasi-headless mode, you could run inside a virtual machine, on a server (as long as it has a (virtual) display), or you wake your PC at night to avoid being interrupted.
 <!-- </details> -->
 
+### Windows quick setup for this fork
+
+This fork includes PowerShell helper scripts for local Windows use. They keep all private runtime state in `data/`, which is ignored by Git. That folder contains the Chromium profile, cookies, logs, screenshots, claim caches, manual action files, extension installs, and `data/config.env`.
+
+From a PowerShell window in the repository root:
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+Copy-Item .\config.env.example .\data\config.env
+notepad .\data\config.env
+```
+
+Fill only the values you want to store locally. You can also leave credentials blank and sign in through the browser during the first visible run.
+
+#### 1Password vault setup
+
+The Windows helper scripts can use the 1Password browser extension instead of storing passwords in `data/config.env`. This is optional if your accounts only use normal passwords, but it is useful when a service uses passkeys/WebAuthn or 1Password-managed MFA. Environment variables can fill passwords and OTP seeds, but they cannot complete a passkey prompt; the 1Password extension can do that during the visible login setup. After login is verified, scheduled runs reuse the saved browser cookies in the ignored `data/browser` profile.
+
+Recommended setup:
+
+1. Create a dedicated 1Password vault, for example `Free Games Claimer`.
+2. Add Login items for the accounts you want the claimer to use.
+3. Make sure the vault is available to the 1Password browser extension on this Windows user account. If an account uses a passkey, store that passkey in the same Login item or vault you unlock for this helper.
+4. Run `.\login-fgc-sites.ps1` or `.\initialize-fgc.ps1`, unlock/sign in to 1Password in the opened Chromium window, then use 1Password to fill each login page.
+5. Return to PowerShell and press Enter when the helper asks you to verify logins. Do not close Chromium until it reports the core logins are verified.
+
+Suggested Login item URLs:
+
+| Account | URLs to add to the 1Password item |
+|---------|-----------------------------------|
+| Epic Games | `https://www.epicgames.com`, `https://store.epicgames.com` |
+| Amazon / Prime Gaming | `https://gaming.amazon.com`, `https://www.amazon.com`, your regional Amazon host such as `https://www.amazon.se`, and your Luna host such as `https://luna.amazon.se` |
+| GOG | `https://www.gog.com` |
+| Microsoft redeem | `https://login.live.com`, `https://account.microsoft.com` |
+| Legacy Games | `https://legacygames.com` |
+
+If your Prime/Luna region is not the default, set `PG_LUNA_BASE_URL` in `data/config.env` before running the login helper. For example, Sweden uses `PG_LUNA_BASE_URL=https://luna.amazon.se`. Extra login pages can be opened with `.\login-fgc-sites.ps1 -ExtraUrls "https://example.com/login"`.
+
+`.\login-fgc-sites.ps1` installs the unpacked 1Password extension into `data/extensions/1password`, opens the supported login pages in the shared Chromium profile, and verifies cookies for the core services. The extension copy and browser profile are under ignored `data/`.
+
+Install dependencies, install Chromium, smoke-check the entrypoints, warm giveaway cache, open login pages, and run the first visible claim pass:
+
+```powershell
+.\initialize-fgc.ps1
+```
+
+To do the same setup and also install automatic scheduled runs:
+
+```powershell
+.\initialize-fgc.ps1 -InstallScheduledTask -DailyAt 09:15 -LogonDelayMinutes 2
+```
+
+Useful day-to-day commands:
+
+```powershell
+# Run all supported stores visibly.
+.\run-fgc.ps1 -NoPause -ShowAll
+
+# Run all supported stores the same way scheduled tasks do.
+.\run-fgc.ps1 -NoPause
+
+# Reopen the shared browser profile for manual logins.
+.\login-fgc-sites.ps1
+
+# Install or update automatic runs.
+.\install-fgc-scheduled-task.ps1 -DailyAt 09:15 -LogonDelayMinutes 2
+
+# Remove the scheduled tasks/startup fallback.
+.\uninstall-fgc-scheduled-task.ps1
+```
+
+Logs are written to `data/logs/`. The scheduled wrapper uses a lock file so overlapping runs are skipped, and by default it avoids running more often than every 12 hours. Epic Games is run visibly because headless Epic runs are more likely to trigger captcha.
+
 ## Usage
 
 All scripts start an automated Chromium instance, either with the browser GUI shown or hidden (_headless mode_). By default, you won't see any browser open on your host system.
@@ -91,21 +164,41 @@ Available options/variables and their default values:
 | NOTIFY         |              | Notification services to use (Pushover, Slack, Telegram...), see below.                                                      |
 | NOTIFY_TITLE   |              | Optional title for notifications, e.g. for Pushover.                                                                         |
 | BROWSER_DIR    | data/browser | Directory for browser profile, e.g. for multiple accounts.                                                                   |
+| EXTENSION_DIRS |              | Unpacked Chromium extension directories to load, separated by `;` on Windows.                                                |
+| EXTENSIONS_IN_HEADLESS | 0    | Also load `EXTENSION_DIRS` for headless runs. Visible runs load extensions by default.                                      |
 | TIMEOUT        | 60           | Timeout for any page action. Should be fine even on slow machines.                                                           |
 | LOGIN_TIMEOUT  | 180          | Timeout for login in seconds. Will wait twice (prompt + manual login).                                                       |
+| CHROME_DEBUGGING_PORT |      | Expose the claimer Chromium over Chrome DevTools Protocol on localhost, e.g. `9222`, for MCP/debug inspection.              |
+| GP_CACHE_TTL_HOURS | 24       | Refresh cached GamerPower redirect targets after this many hours.                                                            |
 | EMAIL          |              | Default email for any login.                                                                                                 |
 | PASSWORD       |              | Default password for any login.                                                                                              |
 | EG_EMAIL       |              | Epic Games email for login. Overrides EMAIL.                                                                                 |
 | EG_PASSWORD    |              | Epic Games password for login. Overrides PASSWORD.                                                                           |
 | EG_OTPKEY      |              | Epic Games MFA OTP key.                                                                                                      |
 | EG_PARENTALPIN |              | Epic Games Parental Controls PIN.                                                                                            |
+| EG_CHECK_GP    | 0            | Epic Games: merge giveaway URLs from GamerPower as a secondary source.                                                      |
 | PG_EMAIL       |              | Prime Gaming email for login. Overrides EMAIL.                                                                               |
 | PG_PASSWORD    |              | Prime Gaming password for login. Overrides PASSWORD.                                                                         |
 | PG_OTPKEY      |              | Prime Gaming MFA OTP key.                                                                                                    |
-| PG_REDEEM      | 0            | Prime Gaming: try to redeem keys on external stores ([experimental](https://github.com/vogler/free-games-claimer/issues/5)). |
+| PG_LUNA_BASE_URL | https://luna.amazon.com | Prime Gaming/Luna claim base URL, e.g. `https://luna.amazon.se` or `https://luna.amazon.co.uk` for regional sessions. |
+| PG_REDEEM      | 0            | Prime Gaming: try to redeem keys on external stores for newly claimed offers ([experimental](https://github.com/vogler/free-games-claimer/issues/5)). |
+| PG_REDEEM_PAST | 0            | Prime Gaming: retry previously saved external-store codes that are not marked redeemed yet.                                  |
+| PG_REDEEM_PAST_VERIFY | 0     | Prime Gaming: verification sweep for saved external-store codes, including already redeemed/not-found terminal states.       |
+| PG_REDEEM_PAST_AUDIT | 0      | Prime Gaming: list stored-code retry candidates without redeeming or printing codes.                                        |
+| PG_REDEEM_PAST_MATCH |        | Prime Gaming: only retry stored codes whose title contains this substring (case-insensitive).                                |
+| PG_REDEEM_PAST_LIMIT | 1      | Prime Gaming: maximum stored codes to retry per run; set to `0` for no limit.                                               |
+| PG_REDEEM_PAST_STORES | gog.com;legacy games | Prime Gaming: stored-code providers to retry; Microsoft/Xbox stay excluded unless added.                         |
+| PG_REDEEM_PAST_DELAY_MS | 2500 | Prime Gaming: wait this long between stored backlog retry attempts.                                                          |
+| PG_REDEEM_BEFORE_FINAL_DELAY_MS | 0 | Prime Gaming: optional debug pause before clicking GOG's final Redeem button.                                           |
+| PG_REDEEM_CONFIRM_DELAY_MS | 2500 | Prime Gaming: keep a confirmed external-store redeem result visible this long before closing the page.                  |
+| PG_REDEEM_RESULT_DELAY_MS | 0 | Prime Gaming: keep any classified external-store redeem result visible this long before closing the page.                    |
+| PG_REDEEM_CAPTCHA_MODE | pause | Prime Gaming: on redeem captcha, pause visible runs for manual solving; other modes record and stop the batch.              |
+| PG_REDEEM_CAPTCHA_TIMEOUT_SECONDS | 600 | Prime Gaming: how long a visible redeem run waits for manual captcha solving.                                  |
+| PG_REDEEM_PAST_STOP_ON_CAPTCHA | 1 | Prime Gaming: stop remaining stored GOG retries after the first captcha in that batch.                                  |
 | PG_CLAIMDLC    | 0            | Prime Gaming: try to claim DLCs ([experimental](https://github.com/vogler/free-games-claimer/issues/55)).                    |
 | GOG_EMAIL      |              | GOG email for login. Overrides EMAIL.                                                                                        |
 | GOG_PASSWORD   |              | GOG password for login. Overrides PASSWORD.                                                                                  |
+| GOG_CHECK_GP   | 0            | GOG: use GamerPower as a secondary fallback if the homepage giveaway banner is missing.                                     |
 | GOG_NEWSLETTER | 0            | Do not unsubscribe from newsletter after claiming a game if 1.                                                               |
 | LG_EMAIL       |              | Legacy Games: email to use for redeeming (if not set, defaults to PG_EMAIL).                                                 |
 
@@ -118,7 +211,7 @@ You can add options directly in the command or put them in a file to load.
 ##### Docker
 
 You can pass variables using `-e VAR=VAL`.
-For example, `docker run -e EMAIL=foo@bar.baz -e NOTIFY='tgram://bottoken/ChatID' ...`.
+For example, `docker run -e EMAIL=foo@bar.baz -e NOTIFY='<apprise-url>' ...`.
 Alternatively, you can pass a file with `--env-file fgc.env` where `fgc.env` is a file on your host system (see [docs](https://docs.docker.com/engine/reference/commandline/run/#env)).
 You can also `docker cp` your configuration file to `/fgc/data/config.env` in the `fgc` volume to store it with the rest of the data instead of on the host ([example](https://github.com/moby/moby/issues/25245#issuecomment-365980572)).
 If you are using [docker compose](https://docs.docker.com/compose/environment-variables/) (or Portainer etc.), you can put options in the `environment:` section.
@@ -127,13 +220,14 @@ If you are using [docker compose](https://docs.docker.com/compose/environment-va
 
 On Linux/macOS you can prefix the variables you want to set, for example `EMAIL=foo@bar.baz SHOW=1 node epic-games` will show the browser and skip asking you for your login email. On Windows you have to use `set`, [example](https://github.com/vogler/free-games-claimer/issues/314).
 You can also put options in `data/config.env` which will be loaded by [dotenv](https://github.com/motdotla/dotenv).
+This repository includes `config.env.example`; copy it to `data/config.env` for local settings. Do not commit `data/config.env`.
 
 ### Notifications
 
 The scripts will try to send notifications for successfully claimed games and any errors like needing to log in or encountered captchas (should not happen).
 
 [apprise](https://github.com/caronc/apprise) is used for notifications and offers many services including Pushover, Slack, Telegram, SMS, Email, desktop and custom notifications.
-You just need to set `NOTIFY` to the notification services you want to use, e.g. `NOTIFY='mailto://myemail@gmail.com' 'pbul://o.gn5kj6nfhv736I7jC3cj3QLRiyhgl98b'` - refer to their list of services and [examples](https://github.com/caronc/apprise#command-line-usage).
+You just need to set `NOTIFY` to the notification services you want to use. Refer to the Apprise service list and [examples](https://github.com/caronc/apprise#command-line-usage), then store your real notification URL in `data/config.env` or your deployment environment.
 
 ### Automatic login, two-factor authentication
 
@@ -151,6 +245,8 @@ Beware that storing passwords and OTP keys as clear text may be a security risk.
 
 Run `node epic-games` (locally or in Docker).
 
+If Epic's own free-games page misses something for your region or platform, you can opt in to a secondary GamerPower check with `EG_CHECK_GP=1`.
+
 ### Amazon Prime Gaming
 
 Run `node prime-gaming` (locally or in Docker).
@@ -162,6 +258,18 @@ Claiming the Amazon Games works out-of-the-box, however, for games on external s
   
   Keys and URLs are printed to the console, included in notifications and saved in `data/prime-gaming.json`. A screenshot of the page with the key is also saved to `data/screenshots`.
   [TODO](https://github.com/vogler/free-games-claimer/issues/5): ~~redeem keys on external stores.~~
+
+To automatically redeem future external-store keys during the normal claim flow, set `PG_REDEEM=1`.
+To revisit older keys already saved in `data/prime-gaming.json`, set `PG_REDEEM_PAST=1`. This is useful for backlog catch-up runs, especially for older GOG codes that were claimed earlier but never redeemed.
+Backlog retries default to one GOG/Legacy code per run. For safer testing, combine `PG_REDEEM_PAST_MATCH=part of title` with the default captcha protection, or run `PG_REDEEM_PAST_AUDIT=1` to list pending titles without printing codes or redeeming.
+For a deliberate verification sweep that reruns all saved GOG/Legacy codes, including entries already marked redeemed or not-found, set `PG_REDEEM_PAST_VERIFY=1` together with `PG_REDEEM_PAST=1`.
+When a newer signed-in Prime name exists, backlog retries also include the legacy `prime-user` cache bucket so older saved codes are not stranded.
+
+### GOG
+
+Run `node gog` (locally or in Docker).
+
+If the homepage banner is flaky for your region, you can opt in to a secondary GamerPower fallback with `GOG_CHECK_GP=1`.
 
 <!-- ### Xbox Games With Gold -->
 <!-- Run `node xbox` (locally or in docker). -->
@@ -178,6 +286,9 @@ Unreal Engine has new assets to claim _every first Tuesday of a month_.
 
 It is safe to run the scripts every day.
 
+Each store also writes a compact machine-readable summary to `data/last-run.json` with status, duration, counters, unresolved `manualActions` from the latest run, and last success time.
+Manual follow-up items are also appended to `data/manual-actions.json` with source/target provider context such as `sourceStore`, `targetProvider`, claim URLs, auth links, redeem URLs and codes when available.
+
 #### How to schedule?
 The container/scripts will claim currently available games and then exit.
 If you want it to run regularly, you have to schedule the runs yourself:
@@ -185,7 +296,7 @@ If you want it to run regularly, you have to schedule the runs yourself:
 - Linux/macOS: `crontab -e` ([example](https://github.com/vogler/free-games-claimer/discussions/56))
 - macOS: [launchd](https://stackoverflow.com/questions/132955/how-do-i-set-a-task-to-run-every-so-often)
 <!-- markdownlint-disable-next-line line-length -->
-- Windows: [task scheduler](https://active-directory-wp.com/docs/Usage/How_to_add_a_cron_job_on_Windows/Scheduled_tasks_and_cron_jobs_on_Windows/index.html) ([example](https://github.com/vogler/free-games-claimer/wiki/%5BHowTo%5D-Schedule-runs-on-Windows)), [other options](https://stackoverflow.com/questions/132971/what-is-the-windows-version-of-cron), or just put the command in a `.bat` file in Autostart if you restart often...
+- Windows: run `.\install-fgc-scheduled-task.ps1 -DailyAt 09:15 -LogonDelayMinutes 2` from the repository root. This creates daily and at-logon tasks named `Free Games Claimer - Daily` and `Free Games Claimer - At Logon`; if Task Scheduler logon registration fails, it creates a Startup-folder fallback. Remove them with `.\uninstall-fgc-scheduled-task.ps1`.
 - any OS: use a process manager like [pm2](https://pm2.keymetrics.io/docs/usage/restart-strategies/)
 - Docker Compose `command: bash -c "node epic-games; node prime-gaming; node gog; echo sleeping; sleep 1d"` additionally add `restart: unless-stopped` to it.
 
