@@ -39,7 +39,6 @@ export const cfg = {
   chrome_debugging_port: Number(process.env.CHROME_DEBUGGING_PORT) || null, // expose Chrome DevTools Protocol on localhost for MCP/debugging
   gp_cache_ttl_hours: Number(process.env.GP_CACHE_TTL_HOURS) || 24, // refresh GamerPower redirects after this many hours
   start_minimized: process.env.START_MINIMIZED == '1', // start visible automation windows minimized where Chromium supports it
-  novnc_port: process.env.NOVNC_PORT, // running in docker if set
   notify: process.env.NOTIFY, // apprise notification services
   notify_title: process.env.NOTIFY_TITLE, // apprise notification title
   extensions_in_headless: process.env.EXTENSIONS_IN_HEADLESS == '1', // opt in to loading EXTENSION_DIRS for headless runs

@@ -70,7 +70,6 @@ const context = await chromium.launchPersistentContext(cfg.dir.browser, {
     '--enable-unsafe-webgpu', // required for WebGPU: Disabled -> Hardware accelerated
     ...extensionArgs({ headless: false }),
   ],
-  // The following makes the browser crash in docker with 'Chromium sandboxing failed!':
   // chromiumSandbox: true, // https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/issues/52
 });
 
@@ -195,7 +194,6 @@ try {
   while (await page.locator('egs-navigation').getAttribute('isloggedin') != 'true') {
     console.error('Not signed in anymore. Please login in the browser or here in the terminal.');
     if (cfg.nowait) abortRun(1, 'Epic Games login required and NOWAIT=1');
-    if (cfg.novnc_port) console.info(`Open http://localhost:${cfg.novnc_port} to login inside the docker container.`);
     if (!cfg.debug) context.setDefaultTimeout(cfg.login_timeout); // give user some extra time to log in
     console.info(`Login timeout is ${cfg.login_timeout / 1000} seconds!`);
     await gotoWithRetry(page, URL_LOGIN, { waitUntil: 'domcontentloaded' }, { label: 'epic-games login page' });
@@ -524,7 +522,7 @@ try {
           sawCaptcha = true;
           // console.info('  Got hcaptcha challenge! NopeCHA extension will likely solve it.')
           console.error('  Got hcaptcha challenge! Lost trust due to too many login attempts? You can solve the captcha in the browser or get a new IP address.');
-          // await notify(`epic-games: got captcha challenge right before claim of <a href="${url}">${title}</a>. Use VNC to solve it manually.`); // TODO not all apprise services understand HTML: https://github.com/vogler/free-games-claimer/pull/417
+          // await notify(`epic-games: got captcha challenge right before claim of <a href="${url}">${title}</a>. Solve it manually in the visible browser.`); // TODO not all apprise services understand HTML: https://github.com/vogler/free-games-claimer/pull/417
           await notify(`epic-games: got captcha challenge for.\nGame link: ${url}`);
           // TODO could even create purchase URL, see https://github.com/vogler/free-games-claimer/pull/130
           // await page.waitForTimeout(2000);

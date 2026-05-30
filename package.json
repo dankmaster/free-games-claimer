@@ -2,10 +2,10 @@
   "name": "free-games-claimer",
   "version": "1.4.0",
   "description": "Automatically claims free games on the Epic Games Store, Amazon Prime Gaming and GOG.",
-  "homepage": "https://github.com/vogler/free-games-claimer",
+  "homepage": "https://github.com/dankmaster/free-games-claimer",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vogler/free-games-claimer.git"
+    "url": "https://github.com/dankmaster/free-games-claimer.git"
   },
   "author": "Ralf Vogler",
   "license": "AGPL-3.0-only",
@@ -16,9 +16,6 @@
     "test:redeem": "node test/redeem-outcomes.js",
     "login-sites": "node login-sites.js",
     "warm-cache": "node warm-cache.js",
-    "docker:build": "docker build . -t ghcr.io/vogler/free-games-claimer",
-    "docker:build-log": "(docker buildx build --progress=plain . -t ghcr.io/vogler/free-games-claimer; docker image ls) 2>&1 | tee data/docker-build.log",
-    "docker": "docker run --rm -it -p 6080:6080 -v fgc:/fgc/data --pull=always ghcr.io/vogler/free-games-claimer",
     "deps:update": "npx taze major -w && npm i"
   },
   "type": "module",

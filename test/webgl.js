@@ -23,7 +23,7 @@ await page.goto('https://get.webgl.org/');
 console.log(await page.locator('h1').innerText());
 await page.goto('https://webglreport.com/?v=2');
 console.log(await page.locator('tr:has-text("Unmasked Renderer")').innerText());
-console.log('Waiting. You can check chrome://gpu as well via noVNC. Press ctrl-c to quit...');
+console.log('Waiting. You can check chrome://gpu in the opened Chromium window. Press ctrl-c to quit...');
 // without --ignore-gpu-blocklist: OpenGL Disabled, WebGL: Software only, hardware acceleration unavailable.
 // Unmasked Renderer: ANGLE (Mesa, llvmpipe (LLVM 15.0.7 128 bits), OpenGL 4.5)
 // with --ignore-gpu-blocklist: OpenGL Enabled, WebGL: Hardware accelerated

@@ -98,7 +98,6 @@ try {
 
   while (!await isFabLoggedIn()) {
     console.error('Not signed in anymore. Please login in the browser or here in the terminal.');
-    if (cfg.novnc_port) console.info(`Open http://localhost:${cfg.novnc_port} to login inside the docker container.`);
     if (!cfg.debug) context.setDefaultTimeout(cfg.login_timeout);
     console.info(`Login timeout is ${cfg.login_timeout / 1000} seconds!`);
     await gotoWithRetry(page, URL_LOGIN, { waitUntil: 'domcontentloaded' }, { label: 'fab login' });

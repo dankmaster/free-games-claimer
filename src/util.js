@@ -218,7 +218,7 @@ export const writeRunSummary = async (run, { user = null, games = [], manualActi
 };
 
 export const handleSIGINT = (context = null) => process.on('SIGINT', async () => { // e.g. when killed by Ctrl-C
-  console.error('\nInterrupted by SIGINT. Exit!'); // Exception shows where the script was:\n'); // killed before catch in docker...
+  console.error('\nInterrupted by SIGINT. Exit!');
   process.exitCode = 130; // 128+SIGINT to indicate to parent that process was killed
   if (context) await closeContextSafely(context); // in order to save recordings also on SIGINT, we need to disable Playwright's handleSIGINT and close the context ourselves
   process.exit(process.exitCode);
