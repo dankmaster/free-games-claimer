@@ -1,7 +1,7 @@
 // https://stackoverflow.com/questions/46745014/alternative-for-dirname-in-node-js-when-using-es6-modules
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, unlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 // not the same since these will give the absolute paths for this file instead of for the file using them
 const __filename = fileURLToPath(import.meta.url);
@@ -22,6 +22,33 @@ export const datetimeUTC = (d = new Date()) => d.toISOString().replace('T', ' ')
 // same as datetimeUTC() but for local timezone, e.g., UTC + 2h for the above in DE
 export const datetime = (d = new Date()) => datetimeUTC(new Date(d.getTime() - d.getTimezoneOffset() * 60000));
 export const filenamify = s => s.replaceAll(':', '.').replace(/[^a-z0-9 _\-.]/gi, '_'); // alternative: https://www.npmjs.com/package/filenamify - On Unix-like systems, / is reserved. On Windows, <>:"/\|?* along with trailing periods are reserved.
+
+export const cleanProfileLocks = profileDir => {
+  if (!profileDir || !existsSync(profileDir)) return [];
+  const removed = [];
+  for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    const lockPath = path.join(profileDir, name);
+    try {
+      const stat = lstatSync(lockPath, { throwIfNoEntry: false });
+      if (!stat) continue;
+      unlinkSync(lockPath);
+      removed.push(name);
+    } catch {
+      // Best effort: if a live browser owns the lock, launchPersistentContext
+      // will fail with the clearer Chromium error.
+    }
+  }
+  return removed;
+};
+
+export const closeContextSafely = async (context, timeoutMs = 15000) => {
+  const closed = await Promise.race([
+    context.close().then(() => true, () => true),
+    delay(timeoutMs).then(() => false),
+  ]);
+  if (!closed) console.warn(`context.close() timed out after ${timeoutMs}ms; letting the process exit.`);
+  return closed;
+};
 
 const RETRYABLE_NAVIGATION_ERROR_PARTS = [
   'timeout',
@@ -193,7 +220,8 @@ export const writeRunSummary = async (run, { user = null, games = [], manualActi
 export const handleSIGINT = (context = null) => process.on('SIGINT', async () => { // e.g. when killed by Ctrl-C
   console.error('\nInterrupted by SIGINT. Exit!'); // Exception shows where the script was:\n'); // killed before catch in docker...
   process.exitCode = 130; // 128+SIGINT to indicate to parent that process was killed
-  if (context) await context.close(); // in order to save recordings also on SIGINT, we need to disable Playwright's handleSIGINT and close the context ourselves
+  if (context) await closeContextSafely(context); // in order to save recordings also on SIGINT, we need to disable Playwright's handleSIGINT and close the context ourselves
+  process.exit(process.exitCode);
 });
 
 export const launchChromium = async options => {
@@ -427,4 +455,9 @@ export const notify = html => new Promise((resolve, reject) => {
 
 export const escapeHtml = unsafe => unsafe.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll('\'', '&#039;');
 
-export const html_game_list = games => games.map(g => `- <a href="${g.url}">${escapeHtml(g.title)}</a> (${g.status})`).join('<br>');
+export const html_game_list = games => games.map(g => {
+  if (g.status == 'action') return `<b><a href="${g.url}">${escapeHtml(g.title)}</a></b>`;
+  let line = `- <a href="${g.url}">${escapeHtml(g.title)}</a> (${g.status})`;
+  if (g.details) line += `<br>  ${g.details}`;
+  return line;
+}).join('<br>');
