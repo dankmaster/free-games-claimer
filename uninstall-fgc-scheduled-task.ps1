@@ -28,13 +28,18 @@ foreach ($taskName in $taskNames) {
     }
 }
 
-$startupLauncher = Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.cmd"
-if (Test-Path $startupLauncher) {
-    Remove-Item -LiteralPath $startupLauncher -Force
-    Write-Host "Removed Startup launcher: $startupLauncher"
-    $removed++
-} else {
-    Write-Host "Not installed: $startupLauncher"
+$startupLaunchers = @(
+    (Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.vbs"),
+    (Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.cmd")
+)
+foreach ($startupLauncher in $startupLaunchers) {
+    if (Test-Path $startupLauncher) {
+        Remove-Item -LiteralPath $startupLauncher -Force
+        Write-Host "Removed Startup launcher: $startupLauncher"
+        $removed++
+    } else {
+        Write-Host "Not installed: $startupLauncher"
+    }
 }
 
 Write-Host ""

@@ -301,7 +301,10 @@ const verifyCoreLogins = async pagesByName => {
 
   const results = [];
   for (const { name, check } of checks) {
-    const page = pagesByName.get(name) || await context.newPage();
+    let page = pagesByName.get(name);
+    if (!page || page.isClosed()) {
+      page = await context.newPage();
+    }
     pagesByName.set(name, page);
     const signedIn = await check(page).catch(error => {
       console.error(`[Login] Could not verify ${name}: ${error.message}`);

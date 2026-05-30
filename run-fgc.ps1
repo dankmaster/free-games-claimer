@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$NoPause,
+    [switch]$NoHideConsole,
+    [switch]$NoLoginPrompts,
+    [switch]$NoAutoInitialize,
     [switch]$InstallOnly,
     [switch]$ShowAll,
     [switch]$SkipEpic,
@@ -11,6 +14,8 @@ param(
     [ValidateSet("0", "1")][string]$ShowPrime = "1",
     [ValidateSet("0", "1")][string]$ShowGog = "1",
     [switch]$NoMinimizeVisibleBrowsers,
+    [switch]$HideVisibleBrowsers,
+    [switch]$NoHideVisibleBrowsers,
     [int]$TimeoutSeconds = 90,
     [int]$LoginTimeoutSeconds = 240,
     [int]$MinIntervalHours = 0,
@@ -18,6 +23,51 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Test-StartedByTaskScheduler {
+    try {
+        $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
+        for ($i = 0; $i -lt 6 -and $currentProcess.ParentProcessId; $i++) {
+            $parentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($currentProcess.ParentProcessId)" -ErrorAction Stop
+            $parentName = "$($parentProcess.Name)".ToLowerInvariant()
+            $parentCommandLine = "$($parentProcess.CommandLine)".ToLowerInvariant()
+            if ($parentName -in @("taskeng.exe", "taskhostw.exe")) {
+                return $true
+            }
+            if ($parentName -eq "svchost.exe" -and $parentCommandLine.Contains("-s schedule")) {
+                return $true
+            }
+            $currentProcess = $parentProcess
+        }
+    } catch { }
+
+    return $false
+}
+
+function Hide-ConsoleWindow {
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]'FgcNative.ConsoleWindow').Type) {
+            Add-Type -Namespace FgcNative -Name ConsoleWindow -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@
+        }
+        $handle = [FgcNative.ConsoleWindow]::GetConsoleWindow()
+        if ($handle -ne [IntPtr]::Zero) {
+            [FgcNative.ConsoleWindow]::ShowWindow($handle, 0) | Out-Null
+        }
+    } catch { }
+}
+
+$startedByTaskScheduler = Test-StartedByTaskScheduler
+$suppressLoginPrompts = $NoLoginPrompts -or $startedByTaskScheduler
+$hideVisibleBrowserWindows = $HideVisibleBrowsers -or ($suppressLoginPrompts -and !$NoHideVisibleBrowsers)
+
+if (!$NoHideConsole -and $startedByTaskScheduler) {
+    Hide-ConsoleWindow
+}
 
 if ($ShowAll) {
     $ShowEpic = "1"
@@ -41,6 +91,8 @@ $stamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $log = Join-Path $logDir "$LogPrefix`_$stamp.log"
 $lastRunStamp = Join-Path $dataDir "last-run-fgc.ps1.txt"
 $runLockPath = Join-Path $dataDir "run-fgc.lock"
+$loginRequiredMarkerPath = Join-Path $dataDir "login-required.flag"
+$autoInitializeMarkerPath = Join-Path $dataDir "initialize-autostart.flag"
 
 function Write-LogLine {
     param([AllowEmptyString()][string]$Value)
@@ -75,12 +127,60 @@ function Invoke-LoggedCommand {
     }
 }
 
+function Start-BrowserWindowSilencer {
+    if (!$script:hideVisibleBrowserWindows) {
+        return $null
+    }
+
+    $silencer = Join-Path $PSScriptRoot "hide-fgc-browser-windows.ps1"
+    if (!(Test-Path -LiteralPath $silencer)) {
+        Write-LogLine "Browser window silencer is missing: $silencer"
+        return $null
+    }
+
+    try {
+        $powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $arguments = @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "`"$silencer`"",
+            "-BrowserDir",
+            "`"$env:BROWSER_DIR`"",
+            "-ParentPid",
+            "$PID",
+            "-Mode",
+            "Hide"
+        )
+        return Start-Process -FilePath $powerShell -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    } catch {
+        Write-LogLine "Could not start browser window silencer: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Stop-BrowserWindowSilencer {
+    param($Process)
+
+    if ($null -eq $Process) {
+        return
+    }
+
+    try {
+        if (!$Process.HasExited) {
+            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+}
+
 function Test-LoginNeededOutput {
     param([string[]]$Lines)
 
     $text = ($Lines -join "`n").ToLowerInvariant()
     return $text.Contains("show=1 node") `
         -or $text.Contains("login required in shown browser") `
+        -or $text.Contains("login required and nowait") `
         -or $text.Contains("sign-in is required") `
         -or $text.Contains("sign in is required") `
         -or $text.Contains("not signed in anymore") `
@@ -88,6 +188,90 @@ function Test-LoginNeededOutput {
         -or $text.Contains("no longer signed in") `
         -or $text.Contains("login failed") `
         -or $text.Contains("not logged in")
+}
+
+function Test-InitializeRunning {
+    $escapedRepo = [regex]::Escape($repo)
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^(powershell|pwsh)\.exe$' -and
+            $_.CommandLine -match 'initialize-fgc\.ps1' -and
+            $_.CommandLine -match $escapedRepo
+        }
+
+    return !!$processes
+}
+
+function Start-InitializeRefresh {
+    param([Parameter(Mandatory=$true)][string]$Reason)
+
+    if ($NoAutoInitialize) {
+        Write-LogLine "Automatic initialize start is disabled for this run."
+        return
+    }
+
+    if (Test-InitializeRunning) {
+        Write-LogLine "Initialize flow is already running; not starting another copy."
+        return
+    }
+
+    if (Test-Path $autoInitializeMarkerPath) {
+        $lastStart = (Get-Item -LiteralPath $autoInitializeMarkerPath).LastWriteTime
+        if (((Get-Date) - $lastStart).TotalMinutes -lt 15) {
+            Write-LogLine "Initialize flow was already auto-started recently; not starting another copy."
+            Write-LogLine "Autostart marker: $autoInitializeMarkerPath"
+            return
+        }
+    }
+
+    $initializeScript = Join-Path $repo "initialize-fgc.ps1"
+    if (!(Test-Path -LiteralPath $initializeScript)) {
+        Write-LogLine "Could not auto-start initialize; missing script: $initializeScript"
+        return
+    }
+
+    $content = @(
+        "Initialize auto-started because: $Reason",
+        "StartedAt=$([DateTimeOffset]::Now.ToString("o"))",
+        "Log=$log",
+        "Script=$initializeScript"
+    )
+    Set-Content -Path $autoInitializeMarkerPath -Value $content -Encoding utf8
+
+    $powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "`"$initializeScript`""
+    )
+    Start-Process -FilePath $powerShell -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Normal | Out-Null
+    Write-LogLine "Started initialize flow for login/setup refresh: $initializeScript"
+}
+
+function Set-LoginRequiredMarker {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [string[]]$Lines = @()
+    )
+
+    $content = @(
+        "Login refresh required for $Name.",
+        "DetectedAt=$([DateTimeOffset]::Now.ToString("o"))",
+        "Log=$log",
+        "",
+        "Background runs are blocked until the shared browser profile is refreshed.",
+        "Run .\initialize-fgc.ps1 from $repo, complete the visible login/setup flow, then let it finish.",
+        "",
+        "Detected output:"
+    )
+    $content += @($Lines | Select-Object -Last 30)
+    Set-Content -Path $loginRequiredMarkerPath -Value $content -Encoding utf8
+    Write-LogLine "Login/session refresh required for $Name."
+    Write-LogLine "Marker written: $loginRequiredMarkerPath"
+    Write-LogLine "Run .\initialize-fgc.ps1 from $repo before background runs continue."
+    Start-InitializeRefresh -Reason "login/session refresh required for $Name"
 }
 
 try {
@@ -118,6 +302,15 @@ function Close-RunLock {
         $script:runLock.Dispose()
         $script:runLock = $null
     }
+}
+
+if ($suppressLoginPrompts -and !$InstallOnly -and (Test-Path $loginRequiredMarkerPath)) {
+    Write-LogLine "Skipping: login/setup refresh is required before background runs can continue."
+    Write-LogLine "Marker: $loginRequiredMarkerPath"
+    Write-LogLine "Run .\initialize-fgc.ps1 from $repo, complete the visible login/setup flow, then let it finish."
+    Start-InitializeRefresh -Reason "existing login-required marker"
+    Close-RunLock
+    exit 1
 }
 
 if ($MinIntervalHours -gt 0 -and (Test-Path $lastRunStamp)) {
@@ -200,6 +393,7 @@ if ($InstallOnly) {
 }
 
 $overallExitCode = 0
+$abortRemainingStores = $false
 
 function Run-Node {
     param(
@@ -211,39 +405,58 @@ function Run-Node {
     $previousNowait = $env:NOWAIT
     $previousBrowserLogin = $env:BROWSER_LOGIN
     $previousStartMinimized = $env:START_MINIMIZED
+    $previousRedeemCaptchaMode = $env:PG_REDEEM_CAPTCHA_MODE
     $env:SHOW = $Show
     if ($Show -eq "0") {
         $env:NOWAIT = "1"
         Remove-Item Env:\BROWSER_LOGIN -ErrorAction SilentlyContinue
         Remove-Item Env:\START_MINIMIZED -ErrorAction SilentlyContinue
     } else {
-        Remove-Item Env:\NOWAIT -ErrorAction SilentlyContinue
-        $env:BROWSER_LOGIN = "1"
+        if ($script:suppressLoginPrompts) {
+            $env:NOWAIT = "1"
+            Remove-Item Env:\BROWSER_LOGIN -ErrorAction SilentlyContinue
+        } else {
+            Remove-Item Env:\NOWAIT -ErrorAction SilentlyContinue
+            $env:BROWSER_LOGIN = "1"
+        }
         if (!$NoMinimizeVisibleBrowsers) {
             $env:START_MINIMIZED = "1"
         } else {
             Remove-Item Env:\START_MINIMIZED -ErrorAction SilentlyContinue
         }
     }
+    if ($script:suppressLoginPrompts) {
+        $env:PG_REDEEM_CAPTCHA_MODE = "stop"
+    }
 
     $header = "===== $Name ($((Get-Date).ToString('s'))) SHOW=$Show ====="
     Write-LogLine $header
 
-    $exitCode = Invoke-LoggedCommand -FilePath "node" -Arguments @($Script)
-    if ($exitCode -ne 0 -and $Show -eq "0" -and !$NoShowOnLogin -and (Test-LoginNeededOutput -Lines $script:lastCommandOutput)) {
-        Write-LogLine "===== $Name needs browser login; retrying visibly with SHOW=1 ====="
-        Write-LogLine ""
-        $env:SHOW = "1"
-        Remove-Item Env:\NOWAIT -ErrorAction SilentlyContinue
-        $env:BROWSER_LOGIN = "1"
-        if (!$NoMinimizeVisibleBrowsers) {
-            $env:START_MINIMIZED = "1"
-        } else {
-            Remove-Item Env:\START_MINIMIZED -ErrorAction SilentlyContinue
-        }
-        $retryHeader = "===== $Name visible login retry ($((Get-Date).ToString('s'))) SHOW=1 ====="
-        Write-LogLine $retryHeader
+    $browserWindowSilencer = Start-BrowserWindowSilencer
+    try {
         $exitCode = Invoke-LoggedCommand -FilePath "node" -Arguments @($Script)
+        $loginNeeded = $exitCode -ne 0 -and (Test-LoginNeededOutput -Lines $script:lastCommandOutput)
+        if ($loginNeeded -and $script:suppressLoginPrompts) {
+            Set-LoginRequiredMarker -Name $Name -Lines $script:lastCommandOutput
+            $script:overallExitCode = $exitCode
+            $script:abortRemainingStores = $true
+        } elseif ($loginNeeded -and $Show -eq "0" -and !$NoShowOnLogin) {
+            Write-LogLine "===== $Name needs browser login; retrying visibly with SHOW=1 ====="
+            Write-LogLine ""
+            $env:SHOW = "1"
+            Remove-Item Env:\NOWAIT -ErrorAction SilentlyContinue
+            $env:BROWSER_LOGIN = "1"
+            if (!$NoMinimizeVisibleBrowsers) {
+                $env:START_MINIMIZED = "1"
+            } else {
+                Remove-Item Env:\START_MINIMIZED -ErrorAction SilentlyContinue
+            }
+            $retryHeader = "===== $Name visible login retry ($((Get-Date).ToString('s'))) SHOW=1 ====="
+            Write-LogLine $retryHeader
+            $exitCode = Invoke-LoggedCommand -FilePath "node" -Arguments @($Script)
+        }
+    } finally {
+        Stop-BrowserWindowSilencer -Process $browserWindowSilencer
     }
 
     if ($null -eq $previousNowait) {
@@ -260,6 +473,11 @@ function Run-Node {
         Remove-Item Env:\START_MINIMIZED -ErrorAction SilentlyContinue
     } else {
         $env:START_MINIMIZED = $previousStartMinimized
+    }
+    if ($null -eq $previousRedeemCaptchaMode) {
+        Remove-Item Env:\PG_REDEEM_CAPTCHA_MODE -ErrorAction SilentlyContinue
+    } else {
+        $env:PG_REDEEM_CAPTCHA_MODE = $previousRedeemCaptchaMode
     }
 
     if ($exitCode -ne 0) {
@@ -279,15 +497,19 @@ if (!$SkipEpic) {
     Run-Node -Name "Epic Games" -Script ".\epic-games.js" -Show $ShowEpic
 }
 
-if (!$SkipPrime) {
+if (!$script:abortRemainingStores -and !$SkipPrime) {
     Run-Node -Name "Prime Gaming" -Script ".\prime-gaming.js" -Show $ShowPrime
 }
 
-if (!$SkipGog) {
+if (!$script:abortRemainingStores -and !$SkipGog) {
     Run-Node -Name "GOG" -Script ".\gog.js" -Show $ShowGog
 }
 
-if ($MinIntervalHours -gt 0) {
+if ($script:abortRemainingStores) {
+    Write-LogLine "Aborted remaining stores because login/setup refresh is required."
+}
+
+if ($MinIntervalHours -gt 0 -and !$script:abortRemainingStores) {
     Set-Content -Path $lastRunStamp -Value ([DateTimeOffset]::Now.ToString("o")) -Encoding utf8
 }
 

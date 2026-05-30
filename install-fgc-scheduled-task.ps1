@@ -6,6 +6,8 @@ param(
     [int]$LogonDelayMinutes = 2,
     [int]$MinIntervalHours = 12,
     [switch]$SkipEpic,
+    [switch]$ShowConsole,
+    [switch]$AllowLoginPrompts,
     [switch]$RunNow
 )
 
@@ -41,7 +43,14 @@ $runnerArguments = "-NoPause -MinIntervalHours $MinIntervalHours"
 if ($SkipEpic) {
     $runnerArguments += " -SkipEpic"
 }
-$argument = "-NoProfile -ExecutionPolicy Bypass -File $quotedRunner $runnerArguments"
+if ($ShowConsole) {
+    $runnerArguments += " -NoHideConsole"
+}
+if (!$AllowLoginPrompts) {
+    $runnerArguments += " -NoLoginPrompts"
+}
+$windowStyleArgument = if ($ShowConsole) { "" } else { "-WindowStyle Hidden " }
+$argument = "-NoProfile -ExecutionPolicy Bypass $windowStyleArgument-File $quotedRunner $runnerArguments"
 $taskRun = "$powerShell $argument"
 $action = New-ScheduledTaskAction -Execute $powerShell -Argument $argument -WorkingDirectory $PSScriptRoot
 $settings = New-ScheduledTaskSettingsSet `
@@ -53,27 +62,36 @@ $settings = New-ScheduledTaskSettingsSet `
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 
 $registered = @()
-$startupLauncher = Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.cmd"
+$startupLauncher = Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.vbs"
+$legacyStartupLauncher = Join-Path ([Environment]::GetFolderPath("Startup")) "Free Games Claimer.cmd"
+
+function ConvertTo-VbsStringLiteral {
+    param([Parameter(Mandatory=$true)][string]$Value)
+
+    return '"' + $Value.Replace('"', '""') + '"'
+}
 
 function New-StartupLauncher {
     $content = @(
-        "@echo off"
+        'Set shell = CreateObject("WScript.Shell")'
     )
     if ($LogonDelayMinutes -gt 0) {
-        $content += "timeout /t $($LogonDelayMinutes * 60) /nobreak >nul"
+        $content += "WScript.Sleep $($LogonDelayMinutes * 60 * 1000)"
     }
     $content += @(
-        "cd /d `"$PSScriptRoot`"",
-        "`"$powerShell`" $argument"
+        "shell.CurrentDirectory = $(ConvertTo-VbsStringLiteral $PSScriptRoot)",
+        "shell.Run $(ConvertTo-VbsStringLiteral $taskRun), 0, False"
     )
     Set-Content -Path $startupLauncher -Value $content -Encoding ASCII
-    Write-Host "Created Startup launcher: $startupLauncher"
+    Write-Host "Created hidden Startup launcher: $startupLauncher"
 }
 
 function Remove-StartupLauncher {
-    if (Test-Path $startupLauncher) {
-        Remove-Item -LiteralPath $startupLauncher -Force
-        Write-Host "Removed fallback Startup launcher: $startupLauncher"
+    foreach ($launcher in @($startupLauncher, $legacyStartupLauncher)) {
+        if (Test-Path $launcher) {
+            Remove-Item -LiteralPath $launcher -Force
+            Write-Host "Removed fallback Startup launcher: $launcher"
+        }
     }
 }
 
@@ -149,7 +167,18 @@ Write-Host "Logon trigger delay: $LogonDelayMinutes minute(s)."
 if ($SkipEpic) {
     Write-Host "Epic Games is skipped for scheduled/startup runs so automation can stay headless."
 } else {
-    Write-Host "Epic Games is included. Epic, Prime, and GOG may start minimized visible browser windows during scheduled/startup runs."
+    Write-Host "Epic Games is included."
+}
+Write-Host "Visible browser windows are hidden during scheduled/startup runs unless -AllowLoginPrompts or -NoHideVisibleBrowsers is used on the runner."
+if ($ShowConsole) {
+    Write-Host "Console windows are enabled for scheduled/startup runs."
+} else {
+    Write-Host "PowerShell/CMD windows are hidden for scheduled/startup runs."
+}
+if ($AllowLoginPrompts) {
+    Write-Host "Login prompts are allowed during scheduled/startup runs."
+} else {
+    Write-Host "Login prompts are suppressed during scheduled/startup runs; expired sessions are logged instead."
 }
 
 if ($RunNow) {
@@ -157,7 +186,12 @@ if ($RunNow) {
         Start-ScheduledTask -TaskName $registered[0]
         Write-Host "Started: $($registered[0])"
     } elseif (Test-Path $startupLauncher) {
-        Start-Process -FilePath $startupLauncher
+        $wscript = (Get-Command wscript.exe -ErrorAction SilentlyContinue).Source
+        if ($wscript) {
+            Start-Process -FilePath $wscript -ArgumentList @("`"$startupLauncher`"") -WindowStyle Hidden
+        } else {
+            Start-Process -FilePath $startupLauncher
+        }
         Write-Host "Started Startup launcher."
     }
 }

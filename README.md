@@ -28,7 +28,7 @@ Open PowerShell in the repository root and run:
 .\initialize-fgc.ps1
 ```
 
-That helper installs npm dependencies, installs Patchright Chromium, prepares the ignored `data/` folder, installs the 1Password browser extension copy when available, opens login pages, verifies the main sessions, warms giveaway caches, and runs a first visible claim pass.
+That helper installs npm dependencies, installs Patchright Chromium, prepares the ignored `data/` folder, installs the 1Password browser extension copy when available, opens login pages, verifies the main sessions, warms giveaway caches, and runs a first no-prompt claim pass against the shared browser profile.
 
 To set up local config manually:
 
@@ -96,7 +96,7 @@ node .\prime-gaming.js
 node .\gog.js
 ```
 
-Epic Games is run visibly by default because headless Epic runs are more likely to trigger captcha. Other stores may run hidden unless a login retry is needed.
+Epic Games, Prime Gaming, and GOG run visibly by default so they can reuse the same browser-session behavior as manual login runs. Wrapper and scheduled runs with login prompts suppressed hide visible browser windows while keeping the shared browser profile active.
 
 Logs are written to `data/logs/`. Screenshots and diagnostics are written under `data/screenshots/`.
 
@@ -121,6 +121,8 @@ Remove scheduled tasks and the startup fallback:
 ```
 
 The scheduled wrapper uses a lock file so overlapping runs are skipped. By default it also avoids running more often than every 12 hours.
+
+Scheduled/startup runs hide the PowerShell/CMD window by default and keep logs under `data/logs/`. They also suppress login prompts and hide visible Chromium windows by default. If a store needs a fresh login, the run writes `data/login-required.flag`, aborts the remaining stores, auto-starts `.\initialize-fgc.ps1`, and blocks future background runs until setup finishes. Add `-ShowConsole` for a visible console or `-AllowLoginPrompts` if you want scheduled runs to wait in the browser for manual login.
 
 ## Configuration
 
